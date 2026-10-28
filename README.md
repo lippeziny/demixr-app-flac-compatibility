@@ -117,10 +117,12 @@ https://user-images.githubusercontent.com/34341442/151656743-57e4d414-d8a8-4495-
 
 ## Automated builds and releases
 
-Pushing a version tag such as `v1.2.3` starts GitHub Actions, builds the Android
-APK, Apple Silicon macOS DMG and unsigned iOS build-check, then uploads the
-artifacts together to one GitHub Release. The same workflow can be started
-manually from **Actions → Build and release app** by entering an existing tag.
+Pushing a version tag beginning with `v` (such as `v1.2.3` or `v0.1`) starts
+GitHub Actions, builds the Android APK, Apple Silicon macOS DMG and unsigned iOS
+build-check, then uploads the artifacts together to one GitHub Release. For a
+manual release, open **Actions → Build and release app**, set `build_ref` to the
+branch/commit to compile (normally `main`), and set `tag_name` to the version
+(such as `v0.1`). The workflow creates the tag if it does not already exist.
 The iOS ZIP is an unsigned build-check, not an installable IPA.
 
 ## Contributing

@@ -1,12 +1,19 @@
 name: Build and release app
+
 on:
   push:
     tags:
-      - 'v*.*.*'
+      # Accept both short tags such as v0.1 and semantic versions such as v1.2.3.
+      - 'v*'
   workflow_dispatch:
     inputs:
+      build_ref:
+        description: 'Branch, tag, or commit to compile (use main for the current source)'
+        required: true
+        default: main
+        type: string
       tag_name:
-        description: 'Existing version tag to build and publish (for example v1.2.3)'
+        description: 'Release tag to create or update (for example v0.1 or v1.2.3)'
         required: true
         type: string
 
@@ -18,13 +25,31 @@ env:
   FLUTTER_VERSION: "3.44.9"
 
 jobs:
+  # Resolve the source exactly once so all platform builds use the same commit.
+  prepare:
+    name: Resolve source commit
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.build_ref || github.ref }}
+          fetch-depth: 1
+      - name: Pin source commit
+        id: resolve
+        shell: bash
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
   android:
     name: Build Android APK
+    needs: prepare
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag_name || github.ref }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -56,13 +81,13 @@ jobs:
 
   macos:
     name: Build macOS app
+    needs: prepare
     # ExecuTorch's macOS prebuilt is arm64-only, so use an Apple Silicon runner.
-    # macos-15 avoids the macos-14 image retirement scheduled for November 2026.
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag_name || github.ref }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
@@ -75,27 +100,12 @@ jobs:
             n=$((n+1)); [ $n -ge 3 ] && exit 1
             echo "::warning::build failed (likely prebuilt download); retry $n"; sleep 20
           done
-      # Some vendored FFmpeg frameworks arrive with stale nested signatures.
-      # Re-sign the complete bundle after Flutter has assembled it, otherwise
-      # Gatekeeper reports the downloaded app as damaged instead of presenting
-      # the expected unidentified-developer warning.
+      # Remove stale signatures and AppleDouble sidecar metadata before signing.
       - name: Ad-hoc sign and verify app
         run: |
           APP=$(ls -d build/macos/Build/Products/Release/*.app | head -1)
-
-          # FFmpegKit's prebuilt frameworks can contain stale signatures whose
-          # resource seals differ between the Intel and ARM distributions.
-          # `codesign --deep` then aborts while examining the stale seal instead
-          # of replacing it. Remove those signatures and explicitly sign every
-          # nested code bundle from the inside out before signing the app.
           find "$APP/Contents" -type d -name _CodeSignature -prune -exec rm -rf {} +
-
-          # The ARM FFmpeg archive also contains AppleDouble `._*` sidecar
-          # files (for example `._Resources`). They are archive metadata, not
-          # runtime files, and codesign otherwise mistakes them for unsigned
-          # nested code/resources.
           find "$APP/Contents" -name '._*' -delete
-
           find "$APP/Contents" -type f \
             \( -name '*.dylib' -o -perm -111 \) \
             ! -path '*/MacOS/*' -print0 |
@@ -104,21 +114,14 @@ jobs:
                 codesign --force --sign - --timestamp=none "$binary"
               fi
             done
-
           while IFS= read -r bundle; do
             codesign --force --sign - --timestamp=none "$bundle"
           done < <(
             find "$APP/Contents" -depth -type d \
               \( -name '*.framework' -o -name '*.appex' -o -name '*.xpc' \)
           )
-
           codesign --force --sign - --timestamp=none "$APP"
           codesign --verify --deep --strict --verbose=2 "$APP"
-      # Build a conventional drag-to-install DMG with a positioned app,
-      # Applications shortcut, and branded mounted-volume icon. The app is
-      # ad-hoc signed (no Apple Developer account), so it is NOT notarized:
-      # users must right-click → Open once. For warning-free double-click
-      # launch, configure Developer ID signing and Apple notarization secrets.
       - name: Package .dmg
         run: |
           brew install create-dmg
@@ -149,25 +152,20 @@ jobs:
           retention-days: 7
 
   ios:
-    # Build-check only: iOS apps can't be distributed without a paid Apple
-    # Developer account (App Store / TestFlight). This confirms iOS still
-    # compiles and produces a re-signable .app — it is NOT installable as-is.
+    # Build-check only: an unsigned iOS app is not installable as-is.
     name: Build iOS app (build-check, unsigned)
+    needs: prepare
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag_name || github.ref }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
       - run: flutter pub get
-      # No Apple signing secrets configured, so this is a build-verification /
-      # re-signable artifact, NOT an installable IPA. To ship a signed .ipa, add
-      # the signing cert + provisioning profile as secrets and switch to
-      # `flutter build ipa --export-options-plist=...`.
       - name: Build iOS (unsigned)
         run: |
           n=0; until flutter build ios --release --no-codesign; do
@@ -186,15 +184,14 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-
   release:
     name: Publish GitHub Release
-    needs: [android, macos, ios]
+    needs: [prepare, android, macos, ios]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag_name || github.ref }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
       - name: Download all platform builds
         uses: actions/download-artifact@v4
         with:
@@ -209,8 +206,10 @@ jobs:
         uses: ncipollo/release-action@v1
         with:
           artifacts: "release-assets/*"
-          tag: ${{ inputs.tag_name || github.ref_name }}
-          name: Demixr ${{ inputs.tag_name || github.ref_name }}
+          tag: ${{ github.event.inputs.tag_name || github.ref_name }}
+          # Required when a manual run is creating a release tag that does not exist yet.
+          commit: ${{ needs.prepare.outputs.source_sha }}
+          name: Demixr ${{ github.event.inputs.tag_name || github.ref_name }}
           generateReleaseNotes: true
           allowUpdates: true
           replacesArtifacts: true
