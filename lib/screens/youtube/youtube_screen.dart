@@ -1,0 +1,23 @@
+import 'package:demixr_app/providers/youtube_provider.dart';
+import 'package:demixr_app/screens/youtube/components/search_bar.dart'
+    as custom_search_bar;
+import 'package:flutter/material.dart';
+import 'package:get/get.dart';
+import 'package:provider/provider.dart';
+
+class YoutubeScreen extends StatelessWidget {
+  const YoutubeScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: ChangeNotifierProvider(
+        create: (context) => YoutubeProvider(Get.arguments),
+        child: Stack(
+          fit: StackFit.expand,
+          children: const [custom_search_bar.SearchBar()],
+        ),
+      ),
+    );
+  }
+}

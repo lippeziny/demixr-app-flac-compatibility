@@ -1,0 +1,219 @@
+name: Build and release app
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Existing version tag to build and publish (for example v1.2.3)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+# Pin to the toolchain the project is developed against.
+env:
+  FLUTTER_VERSION: "3.44.9"
+
+jobs:
+  android:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag_name || github.ref }}
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      # arm64 only: the ExecuTorch (executorch_flutter) Android prebuilt ships
+      # arm64-v8a only, so --split-per-abi / 32-bit builds would fail. Release
+      # is debug-signed (see android/app/build.gradle) — installable, not
+      # Play-Store-ready until a release keystore is configured. Retried: the
+      # ExecuTorch prebuilt download has a short timeout that can flake.
+      - name: Build APK
+        run: |
+          n=0; until flutter build apk --release --target-platform android-arm64; do
+            n=$((n+1)); [ $n -ge 3 ] && exit 1
+            echo "::warning::build failed (likely prebuilt download); retry $n"; sleep 20
+          done
+      - name: Upload Android APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: demixr-android
+          path: build/app/outputs/flutter-apk/*.apk
+          if-no-files-found: error
+          retention-days: 7
+
+  macos:
+    name: Build macOS app
+    # ExecuTorch's macOS prebuilt is arm64-only, so use an Apple Silicon runner.
+    # macos-15 avoids the macos-14 image retirement scheduled for November 2026.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag_name || github.ref }}
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - name: Build macOS
+        run: |
+          n=0; until flutter build macos --release; do
+            n=$((n+1)); [ $n -ge 3 ] && exit 1
+            echo "::warning::build failed (likely prebuilt download); retry $n"; sleep 20
+          done
+      # Some vendored FFmpeg frameworks arrive with stale nested signatures.
+      # Re-sign the complete bundle after Flutter has assembled it, otherwise
+      # Gatekeeper reports the downloaded app as damaged instead of presenting
+      # the expected unidentified-developer warning.
+      - name: Ad-hoc sign and verify app
+        run: |
+          APP=$(ls -d build/macos/Build/Products/Release/*.app | head -1)
+
+          # FFmpegKit's prebuilt frameworks can contain stale signatures whose
+          # resource seals differ between the Intel and ARM distributions.
+          # `codesign --deep` then aborts while examining the stale seal instead
+          # of replacing it. Remove those signatures and explicitly sign every
+          # nested code bundle from the inside out before signing the app.
+          find "$APP/Contents" -type d -name _CodeSignature -prune -exec rm -rf {} +
+
+          # The ARM FFmpeg archive also contains AppleDouble `._*` sidecar
+          # files (for example `._Resources`). They are archive metadata, not
+          # runtime files, and codesign otherwise mistakes them for unsigned
+          # nested code/resources.
+          find "$APP/Contents" -name '._*' -delete
+
+          find "$APP/Contents" -type f \
+            \( -name '*.dylib' -o -perm -111 \) \
+            ! -path '*/MacOS/*' -print0 |
+            while IFS= read -r -d '' binary; do
+              if file "$binary" | grep -q 'Mach-O'; then
+                codesign --force --sign - --timestamp=none "$binary"
+              fi
+            done
+
+          while IFS= read -r bundle; do
+            codesign --force --sign - --timestamp=none "$bundle"
+          done < <(
+            find "$APP/Contents" -depth -type d \
+              \( -name '*.framework' -o -name '*.appex' -o -name '*.xpc' \)
+          )
+
+          codesign --force --sign - --timestamp=none "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+      # Build a conventional drag-to-install DMG with a positioned app,
+      # Applications shortcut, and branded mounted-volume icon. The app is
+      # ad-hoc signed (no Apple Developer account), so it is NOT notarized:
+      # users must right-click → Open once. For warning-free double-click
+      # launch, configure Developer ID signing and Apple notarization secrets.
+      - name: Package .dmg
+        run: |
+          brew install create-dmg
+          APP=$(ls -d build/macos/Build/Products/Release/*.app | head -1)
+          STAGE="$(mktemp -d)/dmg"
+          mkdir -p "$STAGE"
+          cp -R "$APP" "$STAGE/"
+          APP_NAME=$(basename "$APP")
+          create-dmg \
+            --volname "Demixr" \
+            --volicon "$APP/Contents/Resources/AppIcon.icns" \
+            --window-pos 200 120 \
+            --window-size 660 420 \
+            --text-size 14 \
+            --icon-size 128 \
+            --icon "$APP_NAME" 170 190 \
+            --hide-extension "$APP_NAME" \
+            --app-drop-link 490 190 \
+            --no-internet-enable \
+            build/demixr-macos.dmg \
+            "$STAGE"
+      - name: Upload macOS DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: demixr-macos
+          path: build/demixr-macos.dmg
+          if-no-files-found: error
+          retention-days: 7
+
+  ios:
+    # Build-check only: iOS apps can't be distributed without a paid Apple
+    # Developer account (App Store / TestFlight). This confirms iOS still
+    # compiles and produces a re-signable .app — it is NOT installable as-is.
+    name: Build iOS app (build-check, unsigned)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag_name || github.ref }}
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      # No Apple signing secrets configured, so this is a build-verification /
+      # re-signable artifact, NOT an installable IPA. To ship a signed .ipa, add
+      # the signing cert + provisioning profile as secrets and switch to
+      # `flutter build ipa --export-options-plist=...`.
+      - name: Build iOS (unsigned)
+        run: |
+          n=0; until flutter build ios --release --no-codesign; do
+            n=$((n+1)); [ $n -ge 3 ] && exit 1
+            echo "::warning::build failed (likely prebuilt download); retry $n"; sleep 20
+          done
+      - name: Package unsigned .app
+        run: |
+          cd build/ios/iphoneos
+          zip -r -y demixr-ios-unsigned.zip Runner.app
+      - name: Upload unsigned iOS build
+        uses: actions/upload-artifact@v4
+        with:
+          name: demixr-ios
+          path: build/ios/iphoneos/demixr-ios-unsigned.zip
+          if-no-files-found: error
+          retention-days: 7
+
+
+  release:
+    name: Publish GitHub Release
+    needs: [android, macos, ios]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag_name || github.ref }}
+      - name: Download all platform builds
+        uses: actions/download-artifact@v4
+        with:
+          pattern: demixr-*
+          path: release-assets
+          merge-multiple: true
+      - name: Check release assets
+        run: |
+          find release-assets -maxdepth 1 -type f -print
+          test -n "$(find release-assets -maxdepth 1 -type f -print -quit)"
+      - name: Publish release
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: "release-assets/*"
+          tag: ${{ inputs.tag_name || github.ref_name }}
+          name: Demixr ${{ inputs.tag_name || github.ref_name }}
+          generateReleaseNotes: true
+          allowUpdates: true
+          replacesArtifacts: true
+          draft: false
+          prerelease: false
+          token: ${{ secrets.GITHUB_TOKEN }}

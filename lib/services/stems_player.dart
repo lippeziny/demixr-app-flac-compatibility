@@ -1,0 +1,182 @@
+import 'package:audioplayers/audioplayers.dart';
+import 'package:audio_session/audio_session.dart' as system_audio;
+import 'package:demixr_app/models/unmixed_song.dart';
+
+import '../constants.dart';
+
+enum StemState { mute, unmute }
+
+class StemsPlayer {
+  /// Players, created lazily per stem and reused across songs so the
+  /// position/completion streams stay stable. [setUrls] picks which ones are
+  /// active for the current song.
+  final Map<Stem, AudioPlayer> players = {};
+
+  /// The stems present in the current song (excludes the mixture).
+  List<Stem> activeStems = const [];
+  Map<Stem, StemState> stemStates = {};
+  Map<Stem, double> stemVolumes = {};
+  final Map<Stem, double> _lastAudibleVolumes = {};
+  bool mixtureOn = false;
+  int duration = 0;
+
+  /// All stems play simultaneously, so the players must NOT request exclusive
+  /// audio focus on Android (the default) — otherwise each one steals focus
+  /// from the others and they all get paused. iOS has one shared audio session
+  /// per app, so its normal playback category still lets our players mix while
+  /// allowing Demixr to own the system Now Playing controls.
+  static final AudioContext _audioContext = AudioContext(
+    android: const AudioContextAndroid(
+      contentType: AndroidContentType.music,
+      usageType: AndroidUsageType.media,
+      audioFocus: AndroidAudioFocus.none,
+    ),
+    iOS: AudioContextIOS(category: AVAudioSessionCategory.playback),
+  );
+
+  StemsPlayer() {
+    _player(Stem.mixture).mute();
+  }
+
+  /// Returns the [AudioPlayer] for [stem], creating and configuring it on
+  /// first use. Lazy creation keeps the player robust to the set of stems a
+  /// song actually has (4 or 6) without pre-allocating every possible player.
+  AudioPlayer _player(Stem stem) => players.putIfAbsent(
+    stem,
+    () => AudioPlayer()..setAudioContext(_audioContext),
+  );
+
+  AudioPlayer get aPlayer => _player(Stem.vocals);
+
+  Stream<Duration> get onAudioPositionChanged => aPlayer.onPositionChanged;
+
+  Stream<void> get onPlayerCompletion => aPlayer.onPlayerStateChanged.where(
+    (state) => state == PlayerState.completed,
+  );
+
+  StemState getStemState(Stem stem) => stemStates[stem] ?? StemState.mute;
+
+  /// The players in use for the current song: the active stems plus mixture.
+  Iterable<AudioPlayer> get _activePlayers =>
+      [Stem.mixture, ...activeStems].map(_player);
+
+  bool get allStemsUnmute {
+    return activeStems.every((stem) => getStemState(stem) == StemState.unmute);
+  }
+
+  void setUrls(UnmixedSong song) {
+    final previousStates = Map<Stem, StemState>.from(stemStates);
+    activeStems = song.stems;
+    stemStates = {
+      for (final stem in activeStems)
+        stem:
+            previousStates[stem] ??
+            (stem == Stem.vocals ? StemState.mute : StemState.unmute),
+    };
+    stemVolumes = {
+      for (final stem in activeStems)
+        stem:
+            stemVolumes[stem] ?? (getStemState(stem) == StemState.mute ? 0 : 1),
+    };
+    for (final entry in stemVolumes.entries) {
+      if (entry.value > 0) _lastAudibleVolumes[entry.key] = entry.value;
+    }
+    mixtureOn = stemVolumes.values.every((volume) => volume == 1);
+
+    _player(Stem.mixture).setSource(DeviceFileSource(song.mixture));
+    for (final stem in activeStems) {
+      final player = _player(stem)
+        ..setSource(DeviceFileSource(song.getStem(stem)));
+      player.setVolume(mixtureOn ? 0 : stemVolumes[stem]!);
+    }
+
+    _player(Stem.mixture).setVolume(mixtureOn ? 1 : 0);
+  }
+
+  void pause() {
+    for (final player in _activePlayers) {
+      player.pause();
+    }
+  }
+
+  Future<bool> resume() async {
+    final session = await system_audio.AudioSession.instance;
+    if (!await session.setActive(true)) return false;
+    await Future.wait(_activePlayers.map((player) => player.resume()));
+    return true;
+  }
+
+  void stop() {
+    for (final player in _activePlayers) {
+      player.stop();
+    }
+  }
+
+  void seek(Duration position) {
+    for (final player in _activePlayers) {
+      player.seek(position);
+    }
+  }
+
+  void muteAll() {
+    for (final stem in activeStems) {
+      _player(stem).mute();
+    }
+  }
+
+  void unmuteAll() {
+    for (final stem in activeStems) {
+      _player(stem).unMute();
+    }
+  }
+
+  void toggleStem(Stem stem) {
+    final volume = getStemVolume(stem);
+    setStemVolume(stem, volume == 0 ? (_lastAudibleVolumes[stem] ?? 1) : 0);
+  }
+
+  double getStemVolume(Stem stem) => stemVolumes[stem] ?? 0;
+
+  void setStemVolume(Stem stem, double volume) {
+    final normalized = volume.clamp(0.0, 1.0);
+    stemVolumes[stem] = normalized;
+    if (normalized > 0) _lastAudibleVolumes[stem] = normalized;
+    stemStates[stem] = normalized == 0 ? StemState.mute : StemState.unmute;
+
+    final shouldUseMixture = activeStems.every(
+      (activeStem) => getStemVolume(activeStem) == 1,
+    );
+    if (shouldUseMixture != mixtureOn) {
+      mixtureOn = shouldUseMixture;
+      _player(Stem.mixture).setVolume(mixtureOn ? 1 : 0);
+      for (final activeStem in activeStems) {
+        _player(
+          activeStem,
+        ).setVolume(mixtureOn ? 0 : getStemVolume(activeStem));
+      }
+      return;
+    }
+
+    if (!mixtureOn) players[stem]?.setVolume(normalized);
+  }
+}
+
+extension StemStateToggle on StemState {
+  StemState toggle() {
+    return this == StemState.mute ? StemState.unmute : StemState.mute;
+  }
+}
+
+extension AudioPlayerMute on AudioPlayer {
+  void mute() {
+    setVolume(0);
+  }
+
+  void unMute() {
+    setVolume(1);
+  }
+
+  void muteToggle(StemState currentState) {
+    currentState == StemState.mute ? unMute() : mute();
+  }
+}

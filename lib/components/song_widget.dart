@@ -1,0 +1,187 @@
+import 'dart:io';
+
+import 'package:auto_size_text/auto_size_text.dart';
+import 'package:dartz/dartz.dart';
+import 'package:demixr_app/constants.dart';
+import 'package:demixr_app/models/failure/failure.dart';
+import 'package:demixr_app/utils.dart';
+import 'package:flutter/material.dart';
+
+import 'extended_widgets.dart';
+
+class SongInfos extends StatelessWidget {
+  final String title;
+  final List<String> artists;
+  final String? modelName;
+  final double size;
+  final bool alignCenter;
+  final Color textColor;
+
+  const SongInfos({
+    super.key,
+    required this.title,
+    required this.artists,
+    this.size = 16,
+    this.alignCenter = false,
+    this.textColor = ColorPalette.onSurface,
+    this.modelName,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SpacedColumn(
+      spacing: 5,
+      crossAxisAlignment: alignCenter
+          ? CrossAxisAlignment.center
+          : CrossAxisAlignment.start,
+      children: [
+        AutoSizeText(
+          title,
+          textAlign: alignCenter ? TextAlign.center : TextAlign.left,
+          maxLines: 2,
+          minFontSize: 10,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+            fontSize: size,
+            color: textColor,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        AutoSizeText(
+          artists.join(', ') + (modelName != null ? ' \u2027 $modelName' : ''),
+          textAlign: alignCenter ? TextAlign.center : TextAlign.left,
+          maxLines: 1,
+          minFontSize: 8,
+          style: TextStyle(
+            fontSize: size - 2,
+            color: ColorPalette.onSurfaceVariant,
+            fontWeight: FontWeight.w400,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class AlbumCover extends StatelessWidget {
+  final Either<Failure, String> imagePath;
+  final double? size;
+
+  const AlbumCover({super.key, required this.imagePath, this.size = 65});
+
+  @override
+  Widget build(BuildContext context) {
+    Widget fallbackCover() => Image.asset(
+      getAssetPath('default_cover', AssetType.image),
+      fit: BoxFit.cover,
+      width: size,
+      height: size,
+    );
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(size == null ? 16 : size! * .1),
+      child: imagePath.fold((failure) => fallbackCover(), (coverPath) {
+        final cover = File(coverPath);
+        if (!cover.existsSync()) return fallbackCover();
+
+        return Image.file(
+          cover,
+          fit: BoxFit.cover,
+          width: size,
+          height: size,
+          errorBuilder: (context, error, stackTrace) => fallbackCover(),
+        );
+      }),
+    );
+  }
+}
+
+class SongWidget extends StatelessWidget {
+  final String title;
+  final List<String> artists;
+  final String? modelName;
+  final Either<Failure, String> coverPath;
+  final VoidCallback? onRemovePressed;
+  final Color textColor;
+  final bool download;
+
+  /// Download completion ratio (0.0 to 1.0); `null` shows an indeterminate
+  /// spinner. Only used when [download] is true.
+  final double? downloadProgress;
+
+  const SongWidget({
+    super.key,
+    required this.title,
+    required this.artists,
+    required this.coverPath,
+    this.onRemovePressed,
+    this.textColor = ColorPalette.onSurface,
+    this.download = false,
+    this.downloadProgress,
+    this.modelName,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    List<Widget> children = [
+      Expanded(
+        child: SpacedRow(
+          spacing: 15,
+          children: [
+            AlbumCover(imagePath: coverPath),
+            Expanded(
+              child: SongInfos(
+                title: title,
+                artists: artists,
+                textColor: textColor,
+                modelName: modelName,
+              ),
+            ),
+          ],
+        ),
+      ),
+    ];
+
+    if (download) {
+      children.add(
+        Padding(
+          padding: const EdgeInsets.all(10),
+          child: CircularProgressIndicator(
+            // null => indeterminate (e.g. while converting to WAV).
+            value: (downloadProgress ?? 0) > 0 ? downloadProgress : null,
+            color: ColorPalette.primary,
+            strokeWidth: 4,
+          ),
+        ),
+      );
+    } else {
+      children.add(
+        PopupMenuButton(
+          padding: const EdgeInsets.all(0),
+          color: ColorPalette.surfaceContainerHigh,
+          icon: const Icon(
+            Icons.more_horiz_rounded,
+            color: ColorPalette.onSurfaceVariant,
+          ),
+          itemBuilder: (context) => [
+            PopupMenuItem(
+              onTap: onRemovePressed,
+              child: SpacedRow(
+                spacing: 5,
+                children: const [
+                  Icon(Icons.delete, color: ColorPalette.onSurfaceVariant),
+                  Text("Remove"),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: children,
+    );
+  }
+}

@@ -1,0 +1,161 @@
+# Demixr mobile application
+
+> Music source separation on mobile
+
+<p align="center">
+	<img src="doc/screens.png" />
+</p>
+
+![Version badge](https://img.shields.io/github/v/release/demixr/demixr-app?color=orange&label=version&style=for-the-badge)
+![Github build badge](https://img.shields.io/github/workflow/status/demixr/demixr-app/Build%20and%20release%20app?style=for-the-badge)
+
+> :warning: This project is still in development, all the features might not work perfectly yet
+
+
+| Platform | Support |
+| -------- | ------- |
+| Android  | :white_check_mark: Downloadable (APK) |
+| macOS    | :white_check_mark: Downloadable (.dmg) |
+| iOS      | :white_check_mark: Implemented & working — not yet on the App Store* |
+
+<sub>*The iOS build is complete and runs on device; publishing to the App Store / TestFlight requires a paid Apple Developer account ($99/yr), so it isn't distributed yet.</sub>
+
+
+
+## Music source separation
+
+Music source separation is the task of decomposing music into its constitutive components, e. g., yielding separated stems for the vocals, bass, and drums.
+
+
+
+## Features
+
+* Load songs from the device
+  * Supported formats: `flac`, `mp3` and `wav`
+* Download songs from YouTube
+* Source separation in 4 different stems: `Vocals`, `Bass`, `Drums` and `Other`
+* Local library of unmixed songs
+* Integrated music player with the ability to mute / unmute each stem
+* Lossless FLAC exports for the original mix, individual stems and remixes (24-bit PCM); the all-stems ZIP contains FLAC files
+
+
+
+### FLAC support and exports
+
+FLAC files can be imported directly. Demixr uses 24-bit PCM for its working WAV
+files and exports the original mix, separated stems and remixes as 24-bit FLAC.
+FLAC encoding is lossless relative to the PCM samples being encoded; AI source
+separation changes the signal, and converting a lossy source such as MP3 to FLAC
+cannot restore information that was already missing.
+
+## Demixing
+
+The **demixing** uses [Demucs v4 (htdemucs)](https://github.com/facebookresearch/demucs),
+a hybrid-transformer source separation model, and runs cross-platform on
+Android, iOS and macOS. The decode, chunked overlap-add and the inverse STFT all
+run in Dart; only the conv + transformer core runs on the model runtime.
+
+
+
+### Models
+
+The same htdemucs weights ship in two interchangeable backends, selectable at
+download time:
+
+| Model           | Engine                  | Notes                                              |
+| --------------- | ----------------------- | -------------------------------------------------- |
+| htdemucs (GPU)  | ExecuTorch — CoreML (Apple) / Vulkan (Android) | Default. GPU-accelerated; per-platform `.pte`.     |
+| htdemucs (ONNX) | ONNX Runtime — CPU      | Cross-platform, smaller download, runs everywhere. |
+
+Both separate audio into 4 stems: `Vocals`, `Drums`, `Bass`, `Other`.
+
+> **No 6-stem model.** A 6-stem htdemucs variant (which adds `Guitar` and
+> `Piano`) was evaluated but **excluded** — the guitar and piano separation
+> quality was poor in our initial testing, so we kept the app to the 4 stems
+> that work well.
+
+The GPU `.pte` exports are built and hosted at
+[demixr/demucs-executorch](https://github.com/demixr/demucs-executorch); the
+ONNX model is hosted on [Hugging Face](https://huggingface.co/StemSplitio).
+
+## Performance
+
+GPU (ExecuTorch) vs CPU (ONNX) on a 4-minute song, measured:
+
+* **macOS** — GPU ~8.4× faster than CPU.
+* **iPhone** — GPU ~2.5× faster than CPU (≈4× on compute, excluding the one-time
+  model compile, which is warmed up at download time).
+
+> Note: Inference is done on CPU as GPU is not yet fully supported by PyTorch Mobile.
+
+## Download & install
+
+Grab the build for your platform from the [latest GitHub release](https://github.com/demixr/demixr-app/releases/latest/).
+
+### Android (`.apk`)
+1. Download the `.apk` from the release.
+2. Open it. Android will ask to allow installing from this source — enable it
+   (Settings → "Install unknown apps") and confirm.
+3. Open Demixr; on first use it downloads the separation model.
+
+### macOS (`.dmg`)
+1. Download `demixr-macos.dmg` and open it; drag **Demixr** to **Applications**.
+2. The app isn't notarized (it's a free, unsigned build), so the first launch is
+   blocked by Gatekeeper. **Right-click the app → Open → Open** once; afterwards
+   it launches normally.
+
+### iOS
+The iOS app is implemented and works on device, but it isn't distributed yet:
+Apple only allows installs via the App Store / TestFlight, which require a paid
+Apple Developer account ($99/yr). It's the same model and engine as the other
+platforms (GPU-accelerated via CoreML) — just not published. To run it today you
+need to build from source with your own Apple account (`flutter run`).
+
+## Demo
+
+https://user-images.githubusercontent.com/34341442/151656743-57e4d414-d8a8-4495-962a-55b27e08ab4c.mp4
+
+## Automated builds and releases
+
+Pushing a version tag such as `v1.2.3` starts GitHub Actions, builds the Android
+APK, Apple Silicon macOS DMG and unsigned iOS build-check, then uploads the
+artifacts together to one GitHub Release. The same workflow can be started
+manually from **Actions → Build and release app** by entering an existing tag.
+The iOS ZIP is an unsigned build-check, not an installable IPA.
+
+## Contributing
+
+You are more than welome to contribute to Demixr, whether it's for:
+
+* Reporting a bug
+* Discussing the current state of the code
+* Submitting a fix
+* Proposing new features
+* Becoming a maintainer
+
+### Report a bug
+
+You can report bugs using Github issues. Consider filling in the following informations for an optimal report:
+
+* Quick summary
+* Steps to reproduce
+* What you expected would happen
+* What actually happend
+* A screenshot if the bug is graphical
+
+### Submiting a new feature / fix
+
+1. Fork the repo and create your branch from `main`
+2. Make sure to add documentation and tests if necessary
+3. Create a pull request
+
+
+
+## References
+
+* [Open-Unmix](https://sigsep.github.io/open-unmix/)
+* [Flutter](https://docs.flutter.dev/)
+* [Pytorch Mobile](https://pytorch.org/mobile/home/)
+* [Oboe](https://github.com/google/oboe)
+* [Youtube Explode Dart](https://github.com/Hexer10/youtube_explode_dart)
+* [WaveFiles](http://www.labbookpages.co.uk/audio/javaWavFiles.html)
