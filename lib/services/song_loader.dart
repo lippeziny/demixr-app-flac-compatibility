@@ -8,6 +8,10 @@ class SongLoader {
     FilePickerResult? result = await FilePicker.pickFiles(
       type: FileType.custom,
       allowedExtensions: ['mp3', 'wav', 'flac'],
+      // Keep a byte fallback for Android's Storage Access Framework, where
+      // some providers (cloud drives and document providers) do not expose a
+      // stable filesystem path.
+      withData: true,
     );
 
     if (result == null) return Left(NoSongSelected());

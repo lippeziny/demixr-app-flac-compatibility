@@ -36,9 +36,25 @@ class SongHelper {
     Either<Failure, PlatformFile> file = await _service.getFromDevice();
 
     return file.fold((failure) => Left(failure), (file) async {
-      if (file.path == null) return Left(SongLoadFailure());
+      // Android's system document picker (Storage Access Framework) may return
+      // bytes without a filesystem path for some providers. Materialize those
+      // bytes in the app cache so metadata reading and FFmpeg can access them.
+      String? sourcePath = file.path;
+      if (sourcePath == null && file.bytes != null) {
+        final extension = (file.extension ?? 'audio').toLowerCase();
+        final tempDir = await getAppTemp();
+        final tempName = sanitizeFilename(
+          p.basenameWithoutExtension(file.name),
+        );
+        sourcePath = p.join(
+          tempDir,
+          '${tempName}_${DateTime.now().microsecondsSinceEpoch}.$extension',
+        );
+        await File(sourcePath).writeAsBytes(file.bytes!, flush: true);
+      }
+      if (sourcePath == null) return Left(SongLoadFailure());
 
-      File path = File(file.path!);
+      File path = File(sourcePath);
       final metadata = _readMetadata(path, getImage: false);
 
       Tuple2<String, List<String>> songInfos = _getSongInfos(
@@ -51,7 +67,7 @@ class SongHelper {
 
       String newPath;
       try {
-        newPath = await convertToWav(file.path!);
+        newPath = await convertToWav(sourcePath);
       } on ConversionException {
         return Left(SongConversionFailure());
       }
